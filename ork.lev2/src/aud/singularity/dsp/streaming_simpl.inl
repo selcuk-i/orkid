@@ -300,11 +300,17 @@ struct SimpleImpl {
           _read_position_R += frames * playback_rate;
         }
 
-        // Update playback timestamp on the source (safe for main-thread reads)
+        // Update playback stats on the source (safe for main-thread reads).
+        // _current_playback_timestamp = last chunk dequeued into ring buffer.
+        // _ring_buffer_samples = current ring buffer fill (samples between
+        //   dequeue point and actual DAC output).  Python uses these to
+        //   compute: actual_output_ts ≈ timestamp - (samples / sample_rate).
         {
           auto source = _oscil->_streamingdata->_source;
           if (source) {
             source->_current_playback_timestamp.store(_latest_chunk_timestamp, std::memory_order_relaxed);
+            source->_ring_buffer_samples.store(int(current_buffer_size), std::memory_order_relaxed);
+            source->_dsp_sample_rate.store(sample_rate, std::memory_order_relaxed);
           }
         }
 

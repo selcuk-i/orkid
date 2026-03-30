@@ -55,7 +55,9 @@ struct StreamingAudioInputChunkSource : public AudioInputChunkSource {
   svar64_t _impl;
   int _chunk_index = 0;
   bool _was_reset = true;
-  std::atomic<double> _current_playback_timestamp{0.0};  // timestamp of audio currently being played
+  std::atomic<double> _current_playback_timestamp{0.0};  // timestamp of last chunk dequeued into ring buffer
+  std::atomic<int>    _ring_buffer_samples{0};           // DSP ring buffer fill level (samples)
+  std::atomic<float>  _dsp_sample_rate{48000.0f};        // DSP sample rate for computing time offset
 };
 
 ///////////////////////////////////////////////////////////////////////////////
