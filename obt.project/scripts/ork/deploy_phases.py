@@ -1451,13 +1451,15 @@ def phase7_app_bundles(infra_dir, visible_dir, deploy_config):
 # Phase 8: Archive
 ###############################################################################
 
-def phase8_archive(target_dir):
-  """Create a .dmg archive of the deployment.
+def phase8_archive(target_dir, figma_json=None):
+  """Create a .dmg archive with drag-and-drop layout.
 
-  Uses a sparse read-write image + ditto (preserves all macOS metadata
-  including folder icons and resource forks), then converts to compressed
-  read-only UDZO format. The DMG contains a folder named after target_dir
-  so the user can drag it out of the mounted volume.
+  If figma_json is provided, reads the DMG window layout (size, icon
+  positions) from the Figma design's Drag & Drop screen via
+  SwiftFigmaDesign.dmg_layout(). Otherwise uses sensible defaults.
+
+  Creates an Applications symlink and uses AppleScript to set the
+  DMG window size, icon positions, and background.
   """
   import tempfile
 
@@ -1468,6 +1470,26 @@ def phase8_archive(target_dir):
   print(deco.val("=" * 60))
   print(deco.val("Phase 8: Create .dmg Archive"))
   print(deco.val("=" * 60))
+
+  # Load DMG layout from Figma if available
+  layout = None
+  if figma_json and os.path.exists(figma_json):
+    try:
+      from ork.ui.figma.swift_design import SwiftFigmaDesign
+      design = SwiftFigmaDesign(figma_json)
+      layout = design.dmg_layout()
+      if layout:
+        print(deco.val(f"  Figma DMG layout: {layout['window_width']}x{layout['window_height']}"))
+    except Exception as e:
+      print(deco.val(f"  Warning: could not load Figma layout: {e}"))
+
+  if not layout:
+    layout = {
+      "window_width": 540, "window_height": 380, "bg_color": "#ffffff",
+      "icon_size": 130,
+      "app_icon_x": 140, "app_icon_y": 160,
+      "apps_folder_x": 400, "apps_folder_y": 160,
+    }
 
   if dmg_path.exists():
     print(deco.val(f"  Removing existing {dmg_path.name}..."))
@@ -1482,7 +1504,7 @@ def phase8_archive(target_dir):
     ["du", "-sm", str(target_dir)],
     capture_output=True, text=True, check=True)
   size_mb = int(result.stdout.split()[0])
-  size_mb = int(size_mb * 1.2)
+  size_mb = int(size_mb * 1.2) + 10  # extra room for symlink + DS_Store
   print(deco.val(f"    Source: ~{size_mb // 1024}GB (with 20% headroom)"))
 
   with tempfile.TemporaryDirectory() as tmpdir:
@@ -1502,17 +1524,63 @@ def phase8_archive(target_dir):
     ], check=True, capture_output=True)
 
     # Mount it
-    print(deco.val(f"\n  Step 3: Mounting and copying with ditto..."))
+    print(deco.val(f"\n  Step 3: Mounting, copying, and setting layout..."))
     subprocess.run([
       "hdiutil", "attach", sparse_path,
       "-mountpoint", mount_point,
     ], check=True, capture_output=True)
 
     try:
-      # ditto preserves all macOS metadata (resource forks, xattrs, icons)
+      # Copy app contents
       subprocess.run([
         "ditto", str(target_dir), os.path.join(mount_point, vol_name),
       ], check=True)
+
+      # Create Applications symlink for drag-and-drop
+      apps_link = os.path.join(mount_point, "Applications")
+      if not os.path.exists(apps_link):
+        os.symlink("/Applications", apps_link)
+        print(deco.val(f"    Created Applications symlink"))
+
+      # Set DMG window layout via AppleScript
+      w = layout["window_width"]
+      h = layout["window_height"]
+      icon_sz = layout["icon_size"]
+      app_x = layout.get("app_icon_x", 140)
+      app_y = layout.get("app_icon_y", 160)
+      apps_x = layout.get("apps_folder_x", 400)
+      apps_y = layout.get("apps_folder_y", 160)
+
+      applescript = f'''
+      tell application "Finder"
+        tell disk "{vol_name}"
+          open
+          set current view of container window to icon view
+          set toolbar visible of container window to false
+          set statusbar visible of container window to false
+          set bounds of container window to {{100, 100, {100 + w}, {100 + h}}}
+          set theViewOptions to icon view options of container window
+          set arrangement of theViewOptions to not arranged
+          set icon size of theViewOptions to {icon_sz}
+          set position of item "{vol_name}" of container window to {{{app_x}, {app_y}}}
+          set position of item "Applications" of container window to {{{apps_x}, {apps_y}}}
+          close
+          open
+          update without registering applications
+          delay 2
+          close
+        end tell
+      end tell
+      '''
+      print(deco.val(f"    Setting DMG window layout ({w}x{h}, icons at ({app_x},{app_y}), ({apps_x},{apps_y}))..."))
+      result = subprocess.run(
+        ["osascript", "-e", applescript],
+        capture_output=True, text=True, timeout=30)
+      if result.returncode != 0:
+        print(deco.val(f"    Warning: AppleScript layout failed: {result.stderr.strip()}"))
+      else:
+        print(deco.val(f"    DMG window layout set"))
+
     finally:
       # Always detach
       subprocess.run(
@@ -1700,7 +1768,8 @@ def run_deploy(deploy_config):
       sys.exit(1)
 
   if phase in ("8", "all"):
-    ok = phase8_archive(target_dir)
+    figma_json = deploy_config.get("figma_json") if deploy_config else None
+    ok = phase8_archive(target_dir, figma_json=figma_json)
     if not ok:
       sys.exit(1)
 
