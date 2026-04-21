@@ -313,6 +313,28 @@ def _install_macho_launcher(contents_dir, launcher_binary, command_parts, name, 
   shutil.copy2(launcher_binary, dst_launcher)
   os.chmod(dst_launcher, 0o755)
 
+  # ---- Copy the request-permissions helper alongside the launcher ----
+  # Dropped into every gui-mode .app so the downloader's install step can
+  # invoke it once per app to pre-trigger macOS Camera/Microphone TCC
+  # prompts with the correct bundle-id attribution, before any VR/HMD
+  # takeover would hide a later prompt. See ork.core/tools/request_permissions.m.
+  req_perms_src = os.path.join(os.path.dirname(launcher_binary), "request-permissions")
+  if os.path.isfile(req_perms_src):
+    dst_req_perms = os.path.join(macos_dir, "request-permissions")
+    shutil.copy2(req_perms_src, dst_req_perms)
+    os.chmod(dst_req_perms, 0o755)
+    # Sign request-permissions with the target app's bundle id. TCC
+    # attributes prompts by the running binary's code identity, so this
+    # per-app re-sign is what makes the Camera/Microphone prompt route
+    # to "com.impossible.uni.imp" vs "com.impossible.uni.vrchat" etc.
+    # The outer codesign below (without --deep) won't re-stamp this.
+    subprocess.run(
+      ["codesign", "--force", "--sign", "-",
+       "--identifier", bundle_id,
+       "--options", "runtime",
+       dst_req_perms],
+      check=True, capture_output=True)
+
   # ---- Translate command_parts to (--command, joined-cmd) ----
   # Mirrors _terminal_launcher's behavior exactly. Empty command_parts is
   # legal in terminal mode (interactive shell) but doesn't make sense in

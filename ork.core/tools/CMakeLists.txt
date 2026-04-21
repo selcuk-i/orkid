@@ -33,4 +33,27 @@ if(APPLE)
   )
   target_compile_options(obt_app_launcher PRIVATE -Os -Wall -Wextra)
   install(TARGETS obt_app_launcher DESTINATION $ENV{OBT_SUBSPACE_BIN_DIR})
+
+  ###############################################################################
+  # request_permissions (macOS only)
+  #
+  # Tiny ObjC helper dropped into every gui-mode .app bundle (alongside
+  # obt-app-launcher). Called once during downloader install — or on first
+  # launch as a fallback — to request Camera and Microphone TCC grants while
+  # the Mac display is visible, BEFORE any VR/HMD takeover in the real app
+  # would hide a later prompt. TCC attribution is per-bundle-id, so this
+  # binary must be re-signed with each target app's CFBundleIdentifier at
+  # install time — see ork.deploy._install_macho_launcher.
+  ###############################################################################
+  add_executable(request_permissions request_permissions.m)
+  set_target_properties(request_permissions PROPERTIES
+    OUTPUT_NAME "request-permissions"
+    OSX_ARCHITECTURES "arm64;x86_64"
+  )
+  target_compile_options(request_permissions PRIVATE -Os -Wall -Wextra -fobjc-arc)
+  target_link_libraries(request_permissions PRIVATE
+    "-framework AVFoundation"
+    "-framework Foundation"
+  )
+  install(TARGETS request_permissions DESTINATION $ENV{OBT_SUBSPACE_BIN_DIR})
 endif()
