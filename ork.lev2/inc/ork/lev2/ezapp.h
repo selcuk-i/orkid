@@ -283,6 +283,29 @@ public:
   void closeSecondaryWindow(ezsecondarywin_ptr_t win);
   void closeAllSecondaryWindows();
 
+  // Lock the main window's aspect ratio via glfwSetWindowAspectRatio. Pass
+  // (0, 0) to release any existing lock. No-op if GLFW is disabled or the
+  // main GLFW window has not been created yet.
+  void setMainWindowAspectRatio(int numer, int denom);
+
+  // Clamp the main window's resizable range via glfwSetWindowSizeLimits.
+  // Pass <= 0 for any bound you want GLFW to leave unrestricted. No-op if
+  // GLFW is disabled or the main window has not been created yet.
+  void setMainWindowSizeLimits(int min_w, int min_h, int max_w, int max_h);
+
+  // Current main GLFW window size in screen-coordinate points. Returns
+  // (0, 0) if GLFW is disabled or the window has not been created yet.
+  // Queried via glfwGetWindowSize so it reflects the true live size,
+  // independent of whether the widget tree has been relaid out yet.
+  std::pair<int, int> mainWindowSize() const;
+
+  // Explicitly resize the main GLFW window to (w, h) in screen-coord
+  // points. Use to force a resize callback chain (which propagates into
+  // the widget tree's DoLayout) without waiting for the user to drag
+  // the window corner. No-op if GLFW is disabled or the main window
+  // hasn't been created yet.
+  void setMainWindowSize(int w, int h);
+
   // Internal
   void _renderSecondaryWindows();
   void _cleanupClosedSecondaryWindows();

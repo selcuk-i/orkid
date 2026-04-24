@@ -1435,6 +1435,77 @@ void OrkEzApp::_cleanupClosedSecondaryWindows() {
   }
 }
 ///////////////////////////////////////////////////////////////////////////////
+void OrkEzApp::setMainWindowAspectRatio(int numer, int denom) {
+#if defined(ENABLE_GLFW)
+  if (_mainWindow && _mainWindow->_ctqt) {
+    auto ctx = dynamic_cast<CtxGLFW*>(_mainWindow->_ctqt);
+    if (ctx && ctx->_glfwWindow) {
+      // (0,0) tells GLFW to drop any existing lock. Non-zero values fix
+      // the ratio so the user can resize the window but the WM enforces
+      // numer:denom on drag.
+      int n = (numer <= 0 || denom <= 0) ? GLFW_DONT_CARE : numer;
+      int d = (numer <= 0 || denom <= 0) ? GLFW_DONT_CARE : denom;
+      glfwSetWindowAspectRatio(ctx->_glfwWindow, n, d);
+    }
+  }
+#else
+  (void)numer;
+  (void)denom;
+#endif
+}
+///////////////////////////////////////////////////////////////////////////////
+std::pair<int, int> OrkEzApp::mainWindowSize() const {
+#if defined(ENABLE_GLFW)
+  if (_mainWindow && _mainWindow->_ctqt) {
+    auto ctx = dynamic_cast<CtxGLFW*>(_mainWindow->_ctqt);
+    if (ctx && ctx->_glfwWindow) {
+      int w = 0, h = 0;
+      glfwGetWindowSize(ctx->_glfwWindow, &w, &h);
+      return {w, h};
+    }
+  }
+#endif
+  return {0, 0};
+}
+///////////////////////////////////////////////////////////////////////////////
+void OrkEzApp::setMainWindowSize(int w, int h) {
+#if defined(ENABLE_GLFW)
+  if (w <= 0 || h <= 0) return;
+  if (_mainWindow && _mainWindow->_ctqt) {
+    auto ctx = dynamic_cast<CtxGLFW*>(_mainWindow->_ctqt);
+    if (ctx && ctx->_glfwWindow) {
+      glfwSetWindowSize(ctx->_glfwWindow, w, h);
+    }
+  }
+#else
+  (void)w;
+  (void)h;
+#endif
+}
+///////////////////////////////////////////////////////////////////////////////
+void OrkEzApp::setMainWindowSizeLimits(int min_w, int min_h, int max_w, int max_h) {
+#if defined(ENABLE_GLFW)
+  if (_mainWindow && _mainWindow->_ctqt) {
+    auto ctx = dynamic_cast<CtxGLFW*>(_mainWindow->_ctqt);
+    if (ctx && ctx->_glfwWindow) {
+      // Pass GLFW_DONT_CARE for any axis the caller leaves at <= 0, so
+      // callers can set just a lower or upper bound without clobbering
+      // the other.
+      int mnw = (min_w <= 0) ? GLFW_DONT_CARE : min_w;
+      int mnh = (min_h <= 0) ? GLFW_DONT_CARE : min_h;
+      int mxw = (max_w <= 0) ? GLFW_DONT_CARE : max_w;
+      int mxh = (max_h <= 0) ? GLFW_DONT_CARE : max_h;
+      glfwSetWindowSizeLimits(ctx->_glfwWindow, mnw, mnh, mxw, mxh);
+    }
+  }
+#else
+  (void)min_w;
+  (void)min_h;
+  (void)max_w;
+  (void)max_h;
+#endif
+}
+///////////////////////////////////////////////////////////////////////////////
 
 } // namespace ork::lev2
 

@@ -709,6 +709,50 @@ void pyinit_gfx_qtez(py::module& module_lev2) {
           "mainwin",
           [](orkezapp_ptr_t app) -> ezmainwin_ptr_t { return app->_mainWindow; })
       ///////////////////////////////////////////////////////
+      .def(
+          "setMainWindowAspectRatio",
+          [](orkezapp_ptr_t app, int numer, int denom) {
+            app->setMainWindowAspectRatio(numer, denom);
+          },
+          py::arg("numer"),
+          py::arg("denom"),
+          "Lock the main window's aspect ratio to numer:denom. Pass (0, 0) "
+          "to release. No-op if the GLFW main window hasn't been created "
+          "yet.")
+      ///////////////////////////////////////////////////////
+      .def(
+          "setMainWindowSizeLimits",
+          [](orkezapp_ptr_t app, int min_w, int min_h, int max_w, int max_h) {
+            app->setMainWindowSizeLimits(min_w, min_h, max_w, max_h);
+          },
+          py::arg("min_w"),
+          py::arg("min_h"),
+          py::arg("max_w"),
+          py::arg("max_h"),
+          "Clamp the main window's resizable range. Pass <= 0 for any bound "
+          "you want left unrestricted.")
+      ///////////////////////////////////////////////////////
+      .def_property_readonly(
+          "mainWindowSize",
+          [](orkezapp_ptr_t app) -> py::tuple {
+            auto wh = app->mainWindowSize();
+            return py::make_tuple(wh.first, wh.second);
+          },
+          "Current main GLFW window size as (width, height) in screen "
+          "coordinate points. (0, 0) if the window isn't realized yet.")
+      ///////////////////////////////////////////////////////
+      .def(
+          "setMainWindowSize",
+          [](orkezapp_ptr_t app, int w, int h) {
+            app->setMainWindowSize(w, h);
+          },
+          py::arg("w"),
+          py::arg("h"),
+          "Resize the main GLFW window to (w, h) in screen-coord points. "
+          "Fires a resize callback chain that propagates DoLayout through "
+          "the widget tree — use at startup to force a layout pass "
+          "without waiting for a user-driven resize.")
+      ///////////////////////////////////////////////////////
       .def_property_readonly(
           "shouldUpdateThrottleOnGPU",
           [](orkezapp_ptr_t app) -> bool { //
