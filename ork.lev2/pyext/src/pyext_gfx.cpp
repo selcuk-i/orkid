@@ -426,12 +426,27 @@ void pyinit_gfx(py::module& module_lev2) {
           [](const txi_t& the_txi, //
              texture_ptr_t tex,    //
              image_ptr_t img,      //
-             bool async) {         //
-            the_txi->initTextureFromImage(tex.get(), img, false, async);
+             bool async,           //
+             bool mipmap) {        //
+            // When mipmap=true we generate a full mip chain AND configure
+            // the texture to sample trilinear from it. Caller still has to
+            // call applySamplingMode(tex) afterwards for the filter change
+            // to reach the GPU sampler state on backends that require it.
+            if (mipmap) {
+              tex->TexSamplingMode()._texFiltModeMin =
+                  ETextureMinifyFilterMode::LINEAR_MIPMAP_LINEAR;
+              tex->TexSamplingMode()._texFiltModeMag =
+                  ETextureMagnifyFilterMode::LINEAR;
+            }
+            the_txi->initTextureFromImage(tex.get(), img, mipmap, async);
+            if (mipmap) {
+              the_txi->ApplySamplingMode(tex.get());
+            }
           },
           py::arg("tex"),
           py::arg("img"),
-          py::arg("async") = true)
+          py::arg("async") = true,
+          py::arg("mipmap") = false)
       .def(
           "updateTextureArraySlice",           //
           [](const txi_t& the_txi,             //
