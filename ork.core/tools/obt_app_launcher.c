@@ -74,6 +74,71 @@ static int walk_up(char *path, int n) {
   return 0;
 }
 
+// Read the entire contents of `path` into a freshly-malloc'd NUL-terminated
+// buffer. Returns NULL on failure. Caller frees.
+static char *read_file_all(const char *path) {
+  FILE *pf = fopen(path, "r");
+  if (!pf) return NULL;
+  char *all = NULL;
+  size_t cap = 0, len = 0;
+  char chunk[4096];
+  size_t got;
+  while ((got = fread(chunk, 1, sizeof(chunk), pf)) > 0) {
+    if (len + got + 1 > cap) {
+      cap = (cap ? cap * 2 : 8192);
+      while (cap < len + got + 1) cap *= 2;
+      char *grown = (char *)realloc(all, cap);
+      if (!grown) { free(all); fclose(pf); return NULL; }
+      all = grown;
+    }
+    memcpy(all + len, chunk, got);
+    len += got;
+  }
+  fclose(pf);
+  if (!all) return NULL;
+  all[len] = '\0';
+  return all;
+}
+
+// Minimal plist extractor: given the contents of an Info.plist, copy the
+// <string>…</string> value that follows <key>KEY</key> into `out` (up to
+// out_size-1 bytes). Returns 1 on success, 0 if not found / oversized.
+// Avoids pulling in a plist parser for a single-shot lookup.
+static int plist_string_for_key(const char *plist, const char *key,
+                                char *out, size_t out_size) {
+  char needle[128];
+  int n = snprintf(needle, sizeof(needle), "<key>%s</key>", key);
+  if (n <= 0 || (size_t)n >= sizeof(needle)) return 0;
+  const char *kp = strstr(plist, needle);
+  if (!kp) return 0;
+  const char *sp = strstr(kp + n, "<string>");
+  if (!sp) return 0;
+  sp += strlen("<string>");
+  const char *ep = strstr(sp, "</string>");
+  if (!ep || ep <= sp) return 0;
+  size_t vl = (size_t)(ep - sp);
+  if (vl >= out_size) return 0;
+  memcpy(out, sp, vl);
+  out[vl] = '\0';
+  return 1;
+}
+
+// Export __CFBundleIdentifier from the bundle's Info.plist so Cocoa
+// attributes the child's GLFW window to *this* bundle and shows its
+// Dock icon (rather than the generic Python / bash icon).
+static void export_bundle_identifier_from_plist(const char *contents_dir) {
+  char plist_path[MAX_PATH];
+  snprintf(plist_path, sizeof(plist_path), "%s/Info.plist", contents_dir);
+  char *plist = read_file_all(plist_path);
+  if (!plist) return;
+  char bid[256];
+  if (plist_string_for_key(plist, "CFBundleIdentifier", bid, sizeof(bid))) {
+    setenv("__CFBundleIdentifier", bid, 1);
+    fprintf(stderr, "    CFBundleIdentifier: %s\n", bid);
+  }
+  free(plist);
+}
+
 int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
@@ -229,6 +294,11 @@ int main(int argc, char *argv[]) {
 
   // ---- 5. Set DEPLOY_ROOT in environment for the child -------------------
   setenv("DEPLOY_ROOT", deploy_root, 1);
+
+  // Anchor the child's Dock icon to our bundle by exporting
+  // __CFBundleIdentifier before spawn. Read from the bundle's own
+  // Info.plist so this binary stays byte-identical across every app.
+  export_bundle_identifier_from_plist(contents_dir);
 
   // ---- 6. posix_spawn the child as a subprocess --------------------------
   // Critically: NO POSIX_SPAWN_SETEXEC and NO disclaim. We want the launcher
