@@ -25,6 +25,7 @@
 #include <ork/kernel/varmap.inl>
 #include <ork/application/application.h>
 #include <ork/kernel/concurrent_queue.h>
+#include <limits>
 
 namespace ork::lev2 {
 
@@ -76,6 +77,27 @@ using audiodeviceinfo_list_t = std::vector<audiodeviceinfo_ptr_t>;
 
 audiodeviceinfo_list_t enumerateAudioDevices();
 audiodeviceinfo_ptr_t findAudioDeviceByShortId(const std::string& short_id);
+
+///////////////////////////////////////////////////////////////////////////////
+// AudioSettings — runtime overrides applied to the selected input/output
+// device at audio startup (volume, sample rate, ...). Fields with a
+// negative / zero sentinel mean "leave the current system setting alone".
+//
+// Consumed by CoreAudioDevice's _setDeviceSettings() right after the
+// device is opened. Populated by Python via the pybind binding and
+// persisted into a process-global singleton read at startup.
+///////////////////////////////////////////////////////////////////////////////
+
+struct AudioSettings {
+  float _input_level_db  = std::numeric_limits<float>::quiet_NaN();  // NaN = don't force
+  float _output_level_db = std::numeric_limits<float>::quiet_NaN();  // NaN = don't force
+  double _sample_rate = 0.0;                                         // 0 = don't force (e.g. 48000.0)
+};
+using audiosettings_ptr_t = std::shared_ptr<AudioSettings>;
+
+// Process-global AudioSettings read by the audio device at startup.
+// Python / any early init code may mutate it before the device opens.
+audiosettings_ptr_t audioSettings();
 
 struct AudioDevice {
 

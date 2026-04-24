@@ -269,4 +269,14 @@ audiodeviceinfo_ptr_t findAudioDeviceByShortId(const std::string& short_id) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+audiosettings_ptr_t audioSettings() {
+  // Process-global singleton. Mutated from Python (or early C++ init)
+  // before the audio device opens; read by CoreAudioDevice::startup to
+  // apply volume / sample-rate overrides.
+  static audiosettings_ptr_t _settings = std::make_shared<AudioSettings>();
+  return _settings;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
 }} // namespace ork::lev2

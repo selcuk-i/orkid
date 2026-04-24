@@ -71,6 +71,23 @@ namespace ork::lev2 {
       return findAudioDeviceByShortId(short_id);
     }, py::arg("short_id"));
     /////////////////////////////////////////////////////////////////////////////////
+    // AudioSettings — process-global runtime overrides applied to the
+    // selected input / output device at audio startup. Mutate via the
+    // audioSettings() getter; fields are applied by CoreAudioDevice::startup.
+    /////////////////////////////////////////////////////////////////////////////////
+    auto audsettings_t = py::class_<AudioSettings, audiosettings_ptr_t>(lev2_module, "AudioSettings")
+        .def_readwrite("input_level_db",  &AudioSettings::_input_level_db)
+        .def_readwrite("output_level_db", &AudioSettings::_output_level_db)
+        .def_readwrite("sample_rate",     &AudioSettings::_sample_rate)
+        .def("__repr__", [](audiosettings_ptr_t s) -> std::string {
+          return FormatString("AudioSettings(in_db=%.2f, out_db=%.2f, sr=%.0f)",
+                              s->_input_level_db, s->_output_level_db, s->_sample_rate);
+        });
+    type_codec->registerStdCodec<audiosettings_ptr_t>(audsettings_t);
+    lev2_module.def("audioSettings", []() -> audiosettings_ptr_t {
+      return audioSettings();
+    });
+    /////////////////////////////////////////////////////////////////////////////////
     auto auddev_t = py::class_<AudioDevice, audiodevice_ptr_t>(lev2_module, "AudioDevice"); //
     type_codec->registerStdCodec<audiodevice_ptr_t>(auddev_t);
     /////////////////////////////////////////////////////////////////////////////////

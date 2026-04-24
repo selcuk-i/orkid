@@ -26,6 +26,7 @@
 #include <ork/lev2/aud/singularity/audiotest.h>
 #include <mach/mach_time.h>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <errno.h>
@@ -415,41 +416,106 @@ void CoreAudioDevice::startup() {
   //logchan_coreaudio->log("CoreAudioThread _input_impl<%p> _output_impl<%p>", (void*)_input_impl.get(), (void*)_output_impl.get());
 
   if (_input_impl or _output_impl) {
-    _aucontext->Init(_input_impl, _output_impl);
-    _aucontext->Start();
 
-    // Apply volume levels from environment variables (value in dB)
-    auto _setDeviceVolumeDb = [](AudioDeviceID devID, bool isInput, float db) {
-      AudioObjectPropertyAddress addr = {};
-      addr.mSelector = kAudioDevicePropertyVolumeDecibels;
-      addr.mScope    = isInput ? kAudioObjectPropertyScopeInput : kAudioObjectPropertyScopeOutput;
-      // Try per-channel (1 and 2), then master element (0)
-      for (UInt32 element : {1u, 2u, 0u}) {
-        addr.mElement = element;
-        if (AudioObjectHasProperty(devID, &addr)) {
+    // Apply AudioSettings overrides to the selected devices BEFORE the
+    // AudioUnit graph is built — au_io.cpp reads each device's current
+    // nominal sample rate when setting up stream formats, so the rate
+    // override must already be in effect by then. Volume is scope-
+    // sensitive and can be applied at any time after the device is
+    // selected; grouping it here keeps the policy in one place.
+    auto _setDeviceSettings = [](AudioDeviceID devID,
+                                 bool isInput,
+                                 const AudioSettings& s) {
+      // --- volume (dB) ---
+      float db = isInput ? s._input_level_db : s._output_level_db;
+      if (!std::isnan(db)) {
+        AudioObjectPropertyAddress vaddr = {};
+        vaddr.mSelector = kAudioDevicePropertyVolumeDecibels;
+        vaddr.mScope    = isInput ? kAudioObjectPropertyScopeInput
+                                  : kAudioObjectPropertyScopeOutput;
+        // Try per-channel (1 and 2), then master element (0).
+        for (UInt32 element : {1u, 2u, 0u}) {
+          vaddr.mElement = element;
+          if (AudioObjectHasProperty(devID, &vaddr)) {
+            Boolean settable = false;
+            if (AudioObjectIsPropertySettable(devID, &vaddr, &settable) == noErr && settable) {
+              Float32 vol = db;
+              AudioObjectSetPropertyData(devID, &vaddr, 0, NULL, sizeof(vol), &vol);
+            }
+          }
+        }
+      }
+
+      // --- nominal sample rate ---
+      if (s._sample_rate > 0.0) {
+        AudioObjectPropertyAddress raddr = {
+            kAudioDevicePropertyNominalSampleRate,
+            kAudioObjectPropertyScopeGlobal,
+            kAudioObjectPropertyElementMain};
+        if (AudioObjectHasProperty(devID, &raddr)) {
           Boolean settable = false;
-          if (AudioObjectIsPropertySettable(devID, &addr, &settable) == noErr && settable) {
-            Float32 vol = db;
-            AudioObjectSetPropertyData(devID, &addr, 0, NULL, sizeof(vol), &vol);
+          if (AudioObjectIsPropertySettable(devID, &raddr, &settable) == noErr && settable) {
+            Float64 rate = s._sample_rate;
+            OSStatus st = AudioObjectSetPropertyData(devID, &raddr, 0, NULL, sizeof(rate), &rate);
+            if (st != noErr) {
+              logchan_coreaudio->log(
+                  "failed to set nominal sample rate to %.0f for %s device (OSStatus=%d)",
+                  rate, isInput ? "input" : "output", int(st));
+            }
+          } else {
+            logchan_coreaudio->log(
+                "nominal sample rate is not settable on %s device",
+                isInput ? "input" : "output");
           }
         }
       }
     };
 
-    if (_input_info) {
-      if (auto env = std::getenv("ORKID_AUDIO_INPUT_LEVEL")) {
-        float db = float(std::atof(env));
-        _setDeviceVolumeDb(_input_info->_ID, true, db);
-        logchan_coreaudio->log("set input volume for '%s' to %.1f dB", _input_info->_name.c_str(), db);
+    // Env-var fallback for subprocesses and scripts that can't reach the
+    // in-process audioSettings() singleton. Only fills fields still at
+    // their sentinel so explicit Python-side settings win.
+    {
+      auto& s = *audioSettings();
+      if (std::isnan(s._input_level_db)) {
+        if (auto e = std::getenv("ORKID_AUDIO_INPUT_LEVEL"))  s._input_level_db  = float(std::atof(e));
+      }
+      if (std::isnan(s._output_level_db)) {
+        if (auto e = std::getenv("ORKID_AUDIO_OUTPUT_LEVEL")) s._output_level_db = float(std::atof(e));
+      }
+      if (s._sample_rate == 0.0) {
+        if (auto e = std::getenv("ORKID_AUDIO_SAMPLE_RATE"))  s._sample_rate     = std::atof(e);
       }
     }
-    if (_output_info) {
-      if (auto env = std::getenv("ORKID_AUDIO_OUTPUT_LEVEL")) {
-        float db = float(std::atof(env));
-        _setDeviceVolumeDb(_output_info->_ID, false, db);
-        logchan_coreaudio->log("set output volume for '%s' to %.1f dB", _output_info->_name.c_str(), db);
+
+    const auto& settings = *audioSettings();
+    auto _applyAndLog = [&](const char* tag,
+                            coreaudio_device_info_ptr_t info,
+                            bool isInput) {
+      if (!info) return;
+      _setDeviceSettings(info->_ID, isInput, settings);
+      if (settings._sample_rate > 0.0) {
+        // Reflect the override into the cached format the Au graph is about
+        // to consume, so the stream format matches the device we just
+        // reconfigured (CoreAudio gives a brief window before the device
+        // reports the new rate back through its query APIs).
+        info->_format.mSampleRate = settings._sample_rate;
       }
-    }
+      float level = isInput ? settings._input_level_db : settings._output_level_db;
+      // One line per direction; unknown fields print as '-'.
+      char lvl_buf[32];
+      char sr_buf[32];
+      if (std::isnan(level))       snprintf(lvl_buf, sizeof(lvl_buf), "-");
+      else                         snprintf(lvl_buf, sizeof(lvl_buf), "%.1f dB", level);
+      if (settings._sample_rate <= 0.0) snprintf(sr_buf, sizeof(sr_buf), "-");
+      else                              snprintf(sr_buf, sizeof(sr_buf), "%.0f Hz", settings._sample_rate);
+      logchan_coreaudio->log("[%s] '%s' level=%s sr=%s",
+                             tag, info->_name.c_str(), lvl_buf, sr_buf);
+    };
+    _applyAndLog("audio-in",  _input_info,  /*isInput=*/true);
+    _applyAndLog("audio-out", _output_info, /*isInput=*/false);
+
+    _aucontext->Init(_input_impl, _output_impl);
+    _aucontext->Start();
 
     _au_thread = std::make_shared<Thread>("CoreAudioThread");
 
