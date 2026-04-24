@@ -100,15 +100,28 @@ def from_svg_string(svg_string, width, height):
   # Level 2: persistent DataBlockCache (across sessions)
   cached_dblock = core.DataBlockCache.findDataBlock(dblock_key)
   if cached_dblock is not None:
-    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-      tmp.write(bytes(cached_dblock.bytes))
-      tmp_path = tmp.name
-    try:
-      result = lev2.Image.createFromFile(tmp_path)
-    finally:
-      os.unlink(tmp_path)
-    _svg_cache[dblock_key] = result
-    return result
+    # A zero-byte (or PNG-header-short) cached block is pathological:
+    # createFromFile asserts inside datablock.h reading past end-of-buf
+    # and takes the whole app down. Sanity-check the cached bytes and
+    # fall through to regeneration if they're obviously bad. 8 bytes
+    # is the PNG signature alone; anything smaller can't be a PNG.
+    cached_bytes = bytes(cached_dblock.bytes)
+    if len(cached_bytes) >= 8:
+      with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+        tmp.write(cached_bytes)
+        tmp_path = tmp.name
+      try:
+        try:
+          result = lev2.Image.createFromFile(tmp_path)
+        except Exception:
+          result = None
+      finally:
+        os.unlink(tmp_path)
+      if result is not None:
+        _svg_cache[dblock_key] = result
+        return result
+    # Fall through to rsvg-convert below — the cache entry was bad,
+    # regenerate and overwrite it.
 
   # Level 3: generate via rsvg-convert (single invocation)
   with tempfile.NamedTemporaryFile(suffix='.svg', delete=False) as svg_file:
@@ -127,10 +140,14 @@ def from_svg_string(svg_string, width, height):
       svg_path
     ]
     command.run(cmd, do_log=False)
-    # Cache the PNG bytes for next run
+    # Cache the PNG bytes for next run — but only if rsvg actually
+    # produced a non-trivial PNG. Writing a zero-byte cache entry
+    # poisons the cache and asserts on the NEXT run before reaching
+    # this regeneration path again.
     try:
-      png_dblock = core.DataBlock.createFromFile(core.Path(png_path))
-      core.DataBlockCache.setDataBlock(dblock_key, png_dblock)
+      if os.path.getsize(png_path) >= 8:
+        png_dblock = core.DataBlock.createFromFile(core.Path(png_path))
+        core.DataBlockCache.setDataBlock(dblock_key, png_dblock)
     except Exception:
       pass
     result = lev2.Image.createFromFile(png_path)
