@@ -242,31 +242,59 @@ def _wrap_text(text, box_width, font_size):
 
     Average character width is approximately 0.6 * fontSize for proportional fonts.
     """
-    from ork.ui.figma.constants import TEXT_CHAR_WIDTH_RATIO
-    char_width = font_size * TEXT_CHAR_WIDTH_RATIO
+    return [line for line, _start in _wrap_text_indexed(text, box_width, font_size)]
+
+
+def _wrap_text_indexed(text, box_width, font_size, char_width_ratio=None):
+    """Like _wrap_text but returns [(line_text, start_index_in_original)].
+
+    The start index points into `text` (not stripped or modified) and is used
+    by per-character style overrides to slice the right weight runs into each
+    wrapped line. `char_width_ratio` overrides the module-level
+    TEXT_CHAR_WIDTH_RATIO for this one call — used by callers that know a
+    specific TEXT node wants a different wrap density (e.g. per-node
+    override from editor.json)."""
+    if char_width_ratio is None:
+        from ork.ui.figma.constants import TEXT_CHAR_WIDTH_RATIO
+        char_width_ratio = TEXT_CHAR_WIDTH_RATIO
+    char_width = font_size * char_width_ratio
     max_chars = max(1, int(box_width / char_width))
 
     wrapped = []
+    # Walk the original text in one pass so we can emit correct
+    # start-indices for every line we produce.
+    pos = 0
     for paragraph in text.split("\n"):
         if not paragraph:
-            wrapped.append("")
+            wrapped.append(("", pos))
+            pos += 1  # for the \n we just consumed
             continue
         words = paragraph.split(" ")
         current_line = ""
-        for word in words:
-            test = f"{current_line} {word}".strip()
+        current_line_start = pos
+        word_pos = pos
+        for wi, word in enumerate(words):
+            test = f"{current_line} {word}".strip() if current_line else word
             if len(test) > max_chars and current_line:
-                wrapped.append(current_line)
+                wrapped.append((current_line, current_line_start))
                 current_line = word
+                current_line_start = word_pos
             else:
                 current_line = test
+            word_pos += len(word) + 1  # +1 for the space separator
         if current_line:
-            wrapped.append(current_line)
+            wrapped.append((current_line, current_line_start))
+        pos += len(paragraph) + 1  # +1 for the \n separator (may overshoot on last; harmless)
     return wrapped
 
 
 def _convert_text(node, ox, oy):
-    """Convert a Figma TEXT node to SVG text element with word wrapping."""
+    """Convert a Figma TEXT node to SVG text element with word wrapping.
+
+    Honors Figma's per-character rich-text overrides
+    (characterStyleOverrides + styleOverrideTable) by emitting <tspan>
+    runs inside each wrapped line when individual character ranges have
+    a different fontWeight (or other style) than the node's base style."""
     bbox = node.get("absoluteBoundingBox") or {}
     x = bbox.get("x", 0) - ox
     y = bbox.get("y", 0) - oy
@@ -300,32 +328,149 @@ def _convert_text(node, ox, oy):
 
     from ork.ui.figma.constants import TEXT_ASCENDER_RATIO, LINE_HEIGHT_MULTIPLIER
 
-    ascender = font_size * TEXT_ASCENDER_RATIO
-    if v_align == "CENTER":
-        ty = y + (h - font_size) / 2 + ascender
-    elif v_align == "BOTTOM":
-        ty = y + h - (font_size - ascender)
-    else:  # TOP
-        ty = y + ascender
-
     weight_attr = f' font-weight="{font_weight}"' if font_weight != 400 else ''
-
-    # Word-wrap to fit the bounding box width. Uses TEXT_CHAR_WIDTH_RATIO
-    # to estimate character widths — tunable via the editor constants.
-    lines = _wrap_text(text, w, font_size) if w > 0 else text.split("\n")
-
-    # Qt's SVG renderer ignores y on <tspan>, so render each line as
-    # a separate <text> element.
-    parts = []
     common = (f'text-anchor="{anchor}" '
               f'font-family="{font_family}, sans-serif" font-size="{font_size}"'
               f'{weight_attr} fill="{fill}"')
-    for i, line in enumerate(lines):
+
+    # Per-character style overrides (Figma rich text). If present, build a
+    # char_weights array (same length as `text`) where each entry is the
+    # effective fontWeight for that character. Same for fill overrides.
+    char_weights, char_fills = _build_char_style_arrays(node, text, font_weight, fill)
+
+    # Word-wrap. Keep start indices so we can slice the override arrays.
+    # A TEXT node can opt out of the frame-wide char-width ratio via a
+    # per-node override (editor.json `overrides[nid].TEXT_CHAR_WIDTH_RATIO`);
+    # _apply_overrides stashes it on the node when it's loaded.
+    node_ratio = node.get("_text_char_width_ratio_override")
+    if w > 0:
+        wrapped = _wrap_text_indexed(text, w, font_size,
+                                     char_width_ratio=node_ratio)
+    else:
+        wrapped = []
+        pos = 0
+        for p in text.split("\n"):
+            wrapped.append((p, pos))
+            pos += len(p) + 1
+
+    # Resolve vertical anchor. `ty` is the baseline of the FIRST emitted
+    # line. For CENTER / BOTTOM we need to know the total text block
+    # height, which depends on the post-wrap line count (and must include
+    # the trailing blank paragraphs otherwise textAlignVertical=BOTTOM
+    # on a paragraph with trailing `\n\n` would ignore the trailing
+    # whitespace and pull subsequent lines above the intended baseline).
+    ascender = font_size * TEXT_ASCENDER_RATIO
+    line_h = font_size * LINE_HEIGHT_MULTIPLIER
+    n_lines = max(1, len(wrapped))
+    block_h = (n_lines - 1) * line_h + font_size  # visual height of wrapped block
+    if v_align == "CENTER":
+        ty = y + (h - block_h) / 2 + ascender
+    elif v_align == "BOTTOM":
+        # Anchor the LAST visible line's BASELINE so the text block ends
+        # flush with the bbox bottom. Previously this computed ty for the
+        # FIRST line at the bbox bottom, then added `i * line_h` DOWN —
+        # multi-line BOTTOM-anchored text spilled below the bbox.
+        ty = y + h - (font_size - ascender) - (n_lines - 1) * line_h
+    else:  # TOP
+        ty = y + ascender
+
+    parts = []
+    for i, (line, start) in enumerate(wrapped):
         if not line:
             continue
-        line_y = ty + i * font_size * LINE_HEIGHT_MULTIPLIER
-        parts.append(f'<text x="{tx}" y="{line_y}" {common}>{_svg_escape(line)}</text>')
+        line_y = ty + i * line_h
+        if char_weights is None and char_fills is None:
+            parts.append(f'<text x="{tx}" y="{line_y}" {common}>'
+                         f'{_svg_escape(line)}</text>')
+        else:
+            tspans = _render_tspans(line, start, char_weights, char_fills,
+                                    font_weight, fill)
+            parts.append(f'<text x="{tx}" y="{line_y}" {common}>'
+                         f'{tspans}</text>')
     return "\n".join(parts)
+
+
+def _build_char_style_arrays(node, text, base_weight, base_fill):
+    """Build per-character arrays from Figma's characterStyleOverrides +
+    styleOverrideTable. Returns (weights, fills) each either None (no
+    per-char override active) or a list len(text) of effective values."""
+    cso = node.get("characterStyleOverrides") or []
+    table = node.get("styleOverrideTable") or {}
+    if not cso or not table:
+        return None, None
+
+    weights_differ = False
+    fills_differ = False
+    weights = [base_weight] * len(text)
+    fills = [base_fill] * len(text)
+
+    # Figma pads cso to len(characters) but may have trailing default 0s;
+    # iterate up to min length to be safe.
+    n = min(len(cso), len(text))
+    for i in range(n):
+        key = cso[i]
+        if not key:
+            continue
+        ov = table.get(str(key))
+        if not ov:
+            continue
+        if "fontWeight" in ov:
+            fw = ov.get("fontWeight")
+            if fw != base_weight:
+                weights[i] = fw
+                weights_differ = True
+        # Character-level fill override (Figma exposes this as 'fills').
+        for f in ov.get("fills") or []:
+            if f.get("type") == "SOLID" and f.get("visible", True):
+                c = f.get("color") or {}
+                hx = _figma_color_to_hex(c)
+                if hx != base_fill:
+                    fills[i] = hx
+                    fills_differ = True
+
+    return (weights if weights_differ else None,
+            fills if fills_differ else None)
+
+
+def _render_tspans(line, line_start_idx, char_weights, char_fills,
+                   base_weight, base_fill):
+    """Render a single wrapped line as a sequence of <tspan> runs, grouping
+    contiguous characters that share the same override state."""
+    out = []
+    i = 0
+    n = len(line)
+    while i < n:
+        abs_i = line_start_idx + i
+        w_here = (char_weights[abs_i]
+                  if char_weights is not None and abs_i < len(char_weights)
+                  else base_weight)
+        f_here = (char_fills[abs_i]
+                  if char_fills is not None and abs_i < len(char_fills)
+                  else base_fill)
+        j = i + 1
+        while j < n:
+            abs_j = line_start_idx + j
+            w2 = (char_weights[abs_j]
+                  if char_weights is not None and abs_j < len(char_weights)
+                  else base_weight)
+            f2 = (char_fills[abs_j]
+                  if char_fills is not None and abs_j < len(char_fills)
+                  else base_fill)
+            if w2 != w_here or f2 != f_here:
+                break
+            j += 1
+        run = _svg_escape(line[i:j])
+        attrs = []
+        if w_here != base_weight:
+            attrs.append(f'font-weight="{w_here}"')
+        if f_here != base_fill:
+            attrs.append(f'fill="{f_here}"')
+        if attrs:
+            out.append(f'<tspan {" ".join(attrs)}>{run}</tspan>')
+        else:
+            out.append(run)
+        i = j
+    return "".join(out)
 
 
 def _svg_escape(text):
